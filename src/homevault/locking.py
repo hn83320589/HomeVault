@@ -85,10 +85,11 @@ class Lock:
     def acquire(self) -> None:
         self._remove_stale_and_check_conflicts()
         _active_sessions.add(self.info.session)
-        self._name = self._write()
         try:
+            self._name = self._write()
             self._remove_stale_and_check_conflicts()  # 處理兩台電腦同時建立 lock 的競爭
-        except RepositoryLockedError:
+        except BaseException:
+            # 包含當機與 Ctrl+C：不論成功與否都要讓 session 失效，殘留的 lock 才會被判定為殘留
             self.release()
             raise
         self._thread = threading.Thread(target=self._refresh_loop, daemon=True)

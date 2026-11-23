@@ -13,7 +13,7 @@ import os
 import secrets
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from homevault.errors import IntegrityError, RepositoryUnavailableError
@@ -70,9 +70,13 @@ class LocalBackend:
     def write_atomic(self, name: str, data: bytes) -> None:
         tmp = f"{TMP_DIR}/{secrets.token_hex(16)}.tmp"
         with self._io(name):
-            self._op_write(tmp, data)
-            self._op_fsync(tmp)
-            self._op_rename(tmp, name)
+            try:
+                self._op_write(tmp, data)
+                self._op_fsync(tmp)
+                self._op_rename(tmp, name)
+            except BaseException:
+                self._discard_tmp(tmp)  # 例如 Ctrl+C：盡量不留下暫存檔
+                raise
 
     def delete(self, name: str) -> None:
         with self._io(name):
@@ -119,6 +123,11 @@ class LocalBackend:
         path = self._path(name)
         path.unlink()
         fsync_dir(str(path.parent))
+
+    def _discard_tmp(self, name: str) -> None:
+        # 清除失敗不影響正確性：tmp/ 的內容永遠不會被讀取，之後也會被清理
+        with suppress(OSError):
+            self._path(name).unlink()
 
     def _op_mkdir(self, directory: str) -> None:
         self._check_root()

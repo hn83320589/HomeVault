@@ -40,6 +40,10 @@ def _default_opener(path: str) -> BinaryIO:
     return open(path, "rb")
 
 
+class BackupCancelledError(Exception):
+    """備份被中斷，工作執行緒提早結束。"""
+
+
 @dataclass
 class BackupOptions:
     excludes: list[str] = field(default_factory=list)
@@ -154,8 +158,13 @@ class _Archiver:
         self.result_errors: list[str] = []
         self.counts = {"new": 0, "changed": 0, "unmodified": 0, "dirs": 0}
         self._counts_lock = threading.Lock()
+        self._cancelled = threading.Event()
         self._pool = ThreadPoolExecutor(max_workers=max(1, options.threads))
         self._slots = threading.BoundedSemaphore(max(1, options.threads) * 2)
+
+    def cancel(self) -> None:
+        """中斷（例如 Ctrl+C）時讓執行中的工作在下一個區塊就停止，不必等整個檔案讀完。"""
+        self._cancelled.set()
 
     def close(self) -> None:
         self._pool.shutdown(wait=True, cancel_futures=True)
@@ -330,6 +339,8 @@ class _Archiver:
         try:
             with self.opt.opener(path) as f:
                 for chunk in self.chunker.iter_chunks(f):
+                    if self._cancelled.is_set():
+                        raise BackupCancelledError
                     blob_id, stored = self.repo.save_blob(BlobType.DATA, chunk)
                     chunks.append(blob_id)
                     size += len(chunk)
@@ -399,6 +410,9 @@ def run_backup(
         archiver = _Archiver(repo, options, progress)
         try:
             root_tree = archiver.backup_root(paths, parent_root)
+        except BaseException:
+            archiver.cancel()
+            raise
         finally:
             archiver.close()
         repo.flush()

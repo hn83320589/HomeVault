@@ -1,0 +1,46 @@
+[project]
+name = "homevault"
+version = "0.1.0"
+description = "家用增量備份工具：內容定義切塊去重、加密、中斷安全"
+readme = "README.md"
+authors = [
+    { name = "DADA", email = "hn83320589@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=50.0.2",
+    "numpy>=2.5.5",
+    "zstandard>=0.25.0",
+]
+
+[project.scripts]
+homevault = "homevault.cli:run"
+
+[build-system]
+requires = ["uv_build>=0.13.9,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.170.17",
+    "pytest>=9.2.0",
+    "ruff>=0.17.6",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.format]
+exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]  # 允許中文全形標點出現在字串與註解
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "slow: 執行時間較長的測試（大檔案、效能）",
+]

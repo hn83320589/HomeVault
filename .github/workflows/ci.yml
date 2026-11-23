@@ -13,8 +13,8 @@ jobs:
         python: ["3.12", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.4.0
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync --locked
@@ -26,13 +26,13 @@ jobs:
   cross-os-first:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.4.0
         with:
           python-version: "3.12"
       - run: uv sync --locked
       - run: uv run python benchmarks/cross_os_dedup.py first --repo "$RUNNER_TEMP/repo" --data "$RUNNER_TEMP/family-data"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: shared-repo
           path: ${{ runner.temp }}/repo
@@ -42,12 +42,12 @@ jobs:
     needs: cross-os-first
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.4.0
         with:
           python-version: "3.12"
       - run: uv sync --locked
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: shared-repo
           path: ${{ runner.temp }}/repo

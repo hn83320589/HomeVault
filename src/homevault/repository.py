@@ -252,6 +252,21 @@ class Repository:
                 self._write_pack_locked()
         return blob_id, len(sealed)
 
+    def copy_sealed_blob(
+        self, blob_type: BlobType, blob_id: bytes, sealed: bytes, raw_length: int
+    ) -> None:
+        """把已驗證的加密 blob 原樣放進新的 pack（prune 重新打包用）。
+
+        不檢查 blob 是否已在 index 中：舊位置即將被刪除，必須另存一份。
+        """
+        with self._lock:
+            if blob_id in self._pending:
+                return
+            self._pending.add(blob_id)
+            self._packer.add(blob_type, blob_id, sealed, raw_length)
+            if self._packer.size >= self.config.pack_size:
+                self._write_pack_locked()
+
     def load_blob(self, blob_type: BlobType, blob_id: bytes) -> bytes:
         entry = self.index.get(blob_id)
         if entry is None:

@@ -126,3 +126,34 @@ def test_check_reports_corruption_with_exit_code(env, capsys):
     assert code == 13
     assert "受影響的快照與檔案" in stdout
     assert "precious.jpg" in stdout
+
+
+def test_forget_prune_stats_commands(env, capsys):
+    repo = str(env / "repo")
+    src = env / "src"
+    run(capsys, "init", "--repo", repo)
+    for _ in range(3):
+        write_file(src / "data.bin", os.urandom(200_000))
+        run(capsys, "backup", str(src), "--repo", repo, "-q", "--no-low-priority")
+
+    code, stdout, _ = run(capsys, "stats", "--repo", repo)
+    assert code == 0
+    assert "快照數量：3" in stdout
+
+    code, stdout, _ = run(capsys, "forget", "--keep-last", "1", "--dry-run", "--repo", repo)
+    assert code == 0
+    assert "將刪除 2 個快照" in stdout
+
+    code, stdout, _ = run(capsys, "forget", "--keep-last", "1", "--prune", "--repo", repo)
+    assert code == 0
+    assert "已刪除 2 個快照" in stdout
+    assert "釋放" in stdout
+    assert "共 1 個快照" in run(capsys, "snapshots", "--repo", repo)[1]
+
+
+def test_forget_without_rules_is_rejected(env, capsys):
+    repo = str(env / "repo")
+    run(capsys, "init", "--repo", repo)
+    code, _, err = run(capsys, "forget", "--repo", repo)
+    assert code == 2
+    assert "保留規則" in err

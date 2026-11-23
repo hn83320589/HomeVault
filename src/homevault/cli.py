@@ -310,6 +310,88 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 13
 
 
+def _policy_from_args(args: argparse.Namespace):
+    from homevault.retention import KeepPolicy
+
+    return KeepPolicy(
+        last=args.keep_last,
+        hourly=args.keep_hourly,
+        daily=args.keep_daily,
+        weekly=args.keep_weekly,
+        monthly=args.keep_monthly,
+        yearly=args.keep_yearly,
+    )
+
+
+def cmd_forget(args: argparse.Namespace) -> int:
+    from homevault.forget import forget_ids, run_forget
+
+    repo = open_repo(args)
+    if args.snapshot_ids:
+        for sid in forget_ids(repo, args.snapshot_ids):
+            out(f"已刪除快照 {short_id(sid)}")
+    else:
+        plans = run_forget(repo, _policy_from_args(args), dry_run=args.dry_run)
+        verb = "將刪除" if args.dry_run else "已刪除"
+        for group in plans:
+            out(f"主機 {group.hostname}，路徑 {', '.join(group.paths)}")
+            out(f"  保留 {len(group.keep)} 個快照：")
+            for sid, snap, reasons in group.keep:
+                out(f"    {short_id(sid)}  {fmt_time(snap.time)}  {', '.join(reasons)}")
+            out(f"  {verb} {len(group.remove)} 個快照：")
+            for sid, snap in group.remove:
+                out(f"    {short_id(sid)}  {fmt_time(snap.time)}")
+    if args.prune and not args.dry_run:
+        return _prune(repo, args)
+    if not args.dry_run:
+        out("快照已刪除；執行 `homevault prune` 才會實際釋放空間。")
+    return 0
+
+
+def _prune(repo, args: argparse.Namespace) -> int:
+    from homevault.prune import run_prune
+
+    result = run_prune(repo, threshold=args.repack_threshold / 100, dry_run=args.dry_run)
+    plan = result.plan
+    prefix = "（試算）" if args.dry_run else ""
+    out(
+        f"{prefix}刪除 {len(plan.delete)} 個 pack、重新打包 {len(plan.repack)} 個、"
+        f"保留 {len(plan.keep)} 個；移除 {plan.unused_blobs:,} 個未使用的區塊"
+    )
+    freed = result.size_before - result.size_after
+    out(
+        f"{prefix}備份庫資料由 {fmt_bytes(result.size_before)} 變為 "
+        f"{fmt_bytes(result.size_after)}（釋放 {fmt_bytes(freed)}）"
+    )
+    return 0
+
+
+def cmd_prune(args: argparse.Namespace) -> int:
+    return _prune(open_repo(args), args)
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    from homevault.stats import run_stats
+
+    st = run_stats(open_repo(args))
+    out(f"備份庫大小：{fmt_bytes(st.repo_size)}（pack {fmt_bytes(st.pack_bytes)}）")
+    out(f"快照數量：{len(st.snapshots)}")
+    out(f"原始資料總量（所有快照合計）：{fmt_bytes(st.total_logical)}")
+    out(f"去重後的原始資料：{fmt_bytes(st.unique_raw)}（{st.blob_count:,} 個區塊）")
+    out(f"去重、壓縮、加密後：{fmt_bytes(st.unique_stored)}（節省 {st.space_saving:.1%}）")
+    if st.snapshots:
+        out("")
+        out(f"{'ID':<10}{'時間':<21}{'主機':<18}{'原始大小':>12}{'獨有資料':>14}")
+        for s in st.snapshots:
+            out(
+                f"{short_id(s.snapshot_id):<10}{fmt_time(s.snapshot.time):<21}"
+                f"{s.snapshot.hostname:<18}{fmt_bytes(s.logical_size):>12}"
+                f"{fmt_bytes(s.unique_stored):>14}"
+            )
+        out("獨有資料：只被該快照引用的資料，刪除該快照並 prune 後約可釋放的空間。")
+    return 0
+
+
 def cmd_unlock(args: argparse.Namespace) -> int:
     from homevault.locking import is_stale, read_locks
 
@@ -378,6 +460,36 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("check", parents=[common], help="檢查備份庫完整性")
     p.add_argument("--read-data", action="store_true", help="解密並驗證每一個區塊")
     p.set_defaults(func=cmd_check)
+
+    prune_opts = argparse.ArgumentParser(add_help=False)
+    prune_opts.add_argument("--dry-run", action="store_true", help="只顯示會做什麼，不實際刪除")
+    prune_opts.add_argument(
+        "--repack-threshold",
+        type=float,
+        default=20.0,
+        metavar="百分比",
+        help="pack 中未使用的資料超過此比例才重新打包（預設 20）",
+    )
+
+    p = sub.add_parser("forget", parents=[common, prune_opts], help="依保留政策刪除舊快照")
+    p.add_argument("snapshot_ids", nargs="*", metavar="快照ID", help="直接刪除指定快照")
+    for rule, desc in [
+        ("last", "最近 N 個"),
+        ("hourly", "最近 N 個小時各一份"),
+        ("daily", "最近 N 天各一份"),
+        ("weekly", "最近 N 週各一份"),
+        ("monthly", "最近 N 個月各一份"),
+        ("yearly", "最近 N 年各一份"),
+    ]:
+        p.add_argument(f"--keep-{rule}", type=int, default=0, metavar="N", help=f"保留{desc}")
+    p.add_argument("--prune", action="store_true", help="刪除後立即執行 prune")
+    p.set_defaults(func=cmd_forget)
+
+    p = sub.add_parser("prune", parents=[common, prune_opts], help="移除不再使用的資料")
+    p.set_defaults(func=cmd_prune)
+
+    p = sub.add_parser("stats", parents=[common], help="顯示備份庫統計")
+    p.set_defaults(func=cmd_stats)
 
     p = sub.add_parser("unlock", parents=[common], help="清除殘留的 lock")
     p.add_argument("--all", action="store_true", help="連同看起來仍在使用中的 lock 一併清除")

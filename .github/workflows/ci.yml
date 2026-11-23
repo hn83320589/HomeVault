@@ -21,3 +21,34 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest
+
+  # 驗收 4：同一份資料由 macOS 與 Windows 各備份一次到同一個備份庫
+  cross-os-first:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: uv run python benchmarks/cross_os_dedup.py first --repo "$RUNNER_TEMP/repo" --data "$RUNNER_TEMP/family-data"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shared-repo
+          path: ${{ runner.temp }}/repo
+          retention-days: 1
+
+  cross-os-second:
+    needs: cross-os-first
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - uses: actions/download-artifact@v4
+        with:
+          name: shared-repo
+          path: ${{ runner.temp }}/repo
+      - run: uv run python benchmarks/cross_os_dedup.py second --repo "${{ runner.temp }}/repo" --data "${{ runner.temp }}/family-data"

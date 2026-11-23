@@ -45,7 +45,10 @@ def split_snapshot_ref(ref: str) -> tuple[str, str]:
 def find_node(repo: Repository, snapshot: Snapshot, path: str) -> Node:
     """找出快照內某個路徑對應的節點；空字串或 "/" 代表根目錄。"""
     node = Node("", DIR, subtree=snapshot.tree)
-    for part in [p for p in path.replace("\\", "/").split("/") if p]:
+    parts = [p for p in path.replace("\\", "/").split("/") if p]
+    if parts and len(parts[0]) == 2 and parts[0][1] == ":":
+        parts[0] = parts[0][0]  # Windows 磁碟代號：快照內 C:\Users 存成 C/Users
+    for part in parts:
         if node.type != DIR or node.subtree is None:
             raise NotFoundError(f"快照中找不到路徑：{path}")
         children = {n.name: n for n in repo.load_tree(node.subtree)}

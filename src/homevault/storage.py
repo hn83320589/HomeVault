@@ -108,7 +108,8 @@ class LocalBackend:
             f.write(data)
 
     def _op_fsync(self, name: str) -> None:
-        fd = os.open(self._path(name), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        # Windows 的 fsync（FlushFileBuffers）需要可寫入的 handle
+        fd = os.open(self._path(name), os.O_RDWR | getattr(os, "O_BINARY", 0))
         try:
             fsync_fd(fd)
         finally:

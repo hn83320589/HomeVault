@@ -233,3 +233,24 @@ def test_acceptance_1000_files_with_large_file_unicode_and_empty(tmp_path):
     assert restored.errors == []
     assert restored.files == 1001
     assert file_manifest(tmp_path / "out" / "家庭資料") == file_manifest(src)
+
+
+def test_find_node_accepts_windows_drive_paths(small_repo):
+    """快照內 C:\\Users\\Dad 存成 C/Users/Dad，還原時輸入 Windows 路徑也要找得到。"""
+    from homevault.restore import find_node
+    from homevault.snapshot import Snapshot
+    from homevault.tree import DIR, FILE, Node
+
+    small_repo.load_index()
+    leaf = small_repo.save_tree([Node("photo.jpg", FILE, size=0)])
+    users = small_repo.save_tree([Node("Dad", DIR, subtree=leaf)])
+    drive = small_repo.save_tree([Node("Users", DIR, subtree=users)])
+    root = small_repo.save_tree([Node("C", DIR, subtree=drive)])
+    small_repo.flush()
+    snap = Snapshot(time="2026-01-01T23:00:00+08:00", hostname="pc", paths=["C:\\"], tree=root)
+    assert find_node(small_repo, snap, r"C:\Users\Dad\photo.jpg").name == "photo.jpg"
+    assert find_node(small_repo, snap, "/C/Users/Dad").name == "Dad"
+
+
+def test_path_components_for_posix_paths():
+    assert path_components("/Users/mom/Pictures") == ["Users", "mom", "Pictures"]

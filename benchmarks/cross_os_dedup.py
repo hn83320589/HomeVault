@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from homevault.backup import run_backup
+from homevault.cli import ensure_utf8_output
 from homevault.repository import Repository
 from homevault.restore import run_restore
 
@@ -43,6 +44,7 @@ def digests(root: Path) -> dict[str, str]:
 
 
 def main() -> int:
+    ensure_utf8_output()
     parser = argparse.ArgumentParser()
     parser.add_argument("step", choices=["first", "second"])
     parser.add_argument("--repo", required=True)

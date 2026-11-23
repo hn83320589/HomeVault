@@ -524,7 +524,17 @@ class _ZhLevelFilter(logging.Filter):
         return True
 
 
+def ensure_utf8_output() -> None:
+    """Windows 上輸出被導向檔案或 pipe 時（例如排程寫入 log），Python 會改用 cp1252/cp950，
+    遇到中文或 emoji 檔名就拋出 UnicodeEncodeError。改以 UTF-8 輸出。"""
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if encoding != "utf8" and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    ensure_utf8_output()
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "func", None):

@@ -157,3 +157,22 @@ def test_forget_without_rules_is_rejected(env, capsys):
     code, _, err = run(capsys, "forget", "--repo", repo)
     assert code == 2
     assert "保留規則" in err
+
+
+def test_redirected_output_with_non_utf8_locale_does_not_crash(env):
+    """Windows 排程把輸出導向 log 檔時，Python 會改用 cp1252/cp950；中文與 emoji 不可讓程式當掉。"""
+    import subprocess
+    import sys
+
+    repo = env / "repo"
+    src = env / "src"
+    write_file(src / "生日🎂.jpg", b"cake")
+    child_env = {**os.environ, "PYTHONIOENCODING": "cp1252", "HOMEVAULT_PASSWORD": PASSWORD}
+    for args in (["init"], ["backup", str(src), "--no-low-priority"], ["ls", "latest", "-R"]):
+        proc = subprocess.run(
+            [sys.executable, "-m", "homevault", *args, "--repo", str(repo)],
+            env=child_env,
+            capture_output=True,
+        )
+        assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    assert "生日🎂.jpg" in proc.stdout.decode("utf-8")

@@ -23,6 +23,8 @@ import sys
 import time
 from pathlib import Path
 
+from homevault.cli import ensure_utf8_output
+
 MiB = 1024 * 1024
 PASSWORD = "benchmark-password"
 WORDS = ["報稅", "收據", "家庭", "旅行", "照片", "影片", "合約", "保險", "帳單", "學校"]
@@ -87,6 +89,7 @@ def dir_size(path: Path) -> int:
 
 
 def main() -> None:
+    ensure_utf8_output()
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default="bench-data")
     parser.add_argument("--keep", action="store_true", help="保留產生的資料與備份庫")

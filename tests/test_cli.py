@@ -88,3 +88,41 @@ def test_fmt_bytes():
     assert fmt_bytes(0) == "0 B"
     assert fmt_bytes(1536) == "1.50 KiB"
     assert fmt_bytes(5 * 1024**3) == "5.00 GiB"
+
+
+def test_check_and_diff_commands(env, capsys):
+    repo = str(env / "repo")
+    src = env / "src"
+    write_file(src / "a.txt", b"one")
+    run(capsys, "init", "--repo", repo)
+    run(capsys, "backup", str(src), "--repo", repo, "-q", "--no-low-priority")
+    write_file(src / "b.txt", b"two")
+    run(capsys, "backup", str(src), "--repo", repo, "-q", "--no-low-priority")
+
+    code, stdout, _ = run(capsys, "check", "--read-data", "--repo", repo)
+    assert code == 0
+    assert "備份庫完好：2 個快照" in stdout
+
+    _, listing, _ = run(capsys, "snapshots", "--repo", repo)
+    ids = [line.split()[0] for line in listing.splitlines()[1:-1]]
+    code, stdout, _ = run(capsys, "diff", ids[0], ids[1], "--repo", repo)
+    assert code == 0
+    assert "b.txt" in stdout
+    assert "新增 1、刪除 0、修改 0" in stdout
+
+
+def test_check_reports_corruption_with_exit_code(env, capsys):
+    repo = env / "repo"
+    src = env / "src"
+    write_file(src / "precious.jpg", os.urandom(50000))
+    run(capsys, "init", "--repo", str(repo))
+    run(capsys, "backup", str(src), "--repo", str(repo), "-q", "--no-low-priority")
+    pack = next(p for p in (repo / "data").rglob("*") if p.is_file())
+    data = bytearray(pack.read_bytes())
+    data[100] ^= 0xFF
+    pack.write_bytes(bytes(data))
+
+    code, stdout, _ = run(capsys, "check", "--read-data", "--repo", str(repo))
+    assert code == 13
+    assert "受影響的快照與檔案" in stdout
+    assert "precious.jpg" in stdout

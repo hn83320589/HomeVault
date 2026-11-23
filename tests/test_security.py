@@ -98,6 +98,8 @@ def test_repository_does_not_contain_plaintext_content(populated_repo):
         ["ls", "latest"],
         ["restore", "latest", "-t", "{out}"],
         ["unlock", "--all"],
+        ["check", "--read-data"],
+        ["diff", "latest", "latest"],
     ],
 )
 def test_wrong_password_reads_nothing_and_changes_nothing(

@@ -96,6 +96,9 @@ class Lock:
 
     def release(self) -> None:
         self._stop.set()
+        # 先等 refresh 執行緒結束，否則它可能在我們刪除後又寫出新的 lock 檔
+        if self._thread and self._thread is not threading.current_thread():
+            self._thread.join()
         _active_sessions.discard(self.info.session)
         if self._name is None:
             return

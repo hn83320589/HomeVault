@@ -261,6 +261,55 @@ def cmd_restore(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_diff(args: argparse.Namespace) -> int:
+    from homevault.browse import ADDED, MODIFIED, REMOVED, diff_snapshots
+
+    repo = open_repo(args)
+    id_a, snap_a = repo.find_snapshot(args.snapshot_a)
+    id_b, snap_b = repo.find_snapshot(args.snapshot_b)
+    entries = diff_snapshots(repo, snap_a, snap_b)
+    out(f"比較快照 {short_id(id_a)} → {short_id(id_b)}")
+    for e in entries:
+        out(f"{e.kind}  {e.path}{'/' if e.is_dir else ''}")
+    count = {k: sum(1 for e in entries if e.kind == k and not e.is_dir) for k in "+-M"}
+    out(f"檔案：新增 {count[ADDED]}、刪除 {count[REMOVED]}、修改 {count[MODIFIED]}")
+    return 0
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    from homevault.check import run_check
+
+    repo = open_repo(args)
+
+    def progress(message: str) -> None:
+        if not args.quiet and sys.stderr.isatty():
+            sys.stderr.write("\r\033[K" + message)
+            sys.stderr.flush()
+
+    result = run_check(repo, read_data=args.read_data, progress=progress)
+    if not args.quiet and sys.stderr.isatty():
+        sys.stderr.write("\r\033[K")
+    for info in result.infos:
+        out(f"ℹ {info}")
+    if result.ok:
+        detail = f"，已解密驗證 {result.blobs_verified:,} 個區塊" if args.read_data else ""
+        out(f"✓ 備份庫完好：{len(result.snapshots)} 個快照{detail}")
+        return 0
+    out(f"✗ 發現 {len(result.errors)} 個問題：")
+    for err in result.errors:
+        out(f"  - {err}")
+    if result.affected:
+        out("受影響的快照與檔案：")
+        for snap_id, paths in sorted(result.affected.items(), key=lambda kv: kv[0]):
+            snap = result.snapshots[snap_id]
+            out(f"  快照 {short_id(snap_id)}（{fmt_time(snap.time)}，{snap.hostname}）")
+            for path in paths:
+                out(f"    {path}")
+    else:
+        out("所有快照引用的資料都完好，仍可完整還原。")
+    return 13
+
+
 def cmd_unlock(args: argparse.Namespace) -> int:
     from homevault.locking import is_stale, read_locks
 
@@ -320,6 +369,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-t", "--target", required=True, help="還原到哪個資料夾")
     p.add_argument("--overwrite", action="store_true", help="覆寫已存在的檔案")
     p.set_defaults(func=cmd_restore)
+
+    p = sub.add_parser("diff", parents=[common], help="比較兩個快照的差異")
+    p.add_argument("snapshot_a", metavar="快照A")
+    p.add_argument("snapshot_b", metavar="快照B")
+    p.set_defaults(func=cmd_diff)
+
+    p = sub.add_parser("check", parents=[common], help="檢查備份庫完整性")
+    p.add_argument("--read-data", action="store_true", help="解密並驗證每一個區塊")
+    p.set_defaults(func=cmd_check)
 
     p = sub.add_parser("unlock", parents=[common], help="清除殘留的 lock")
     p.add_argument("--all", action="store_true", help="連同看起來仍在使用中的 lock 一併清除")

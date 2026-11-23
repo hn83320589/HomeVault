@@ -106,12 +106,18 @@ def test_incremental_backup_does_not_read_unchanged_files(small_repo, tmp_path):
 
 
 def test_full_scan_rereads_every_file(small_repo, tmp_path):
+    from homevault.pack import BlobType
+
     src = make_tree(tmp_path / "src")
     run_backup(small_repo, [str(src)])
+    before = set(small_repo.index.blob_ids())
     opener = CountingOpener()
-    result = run_backup(small_repo, [str(src)], BackupOptions(opener=opener, full_scan=True))
+    run_backup(small_repo, [str(src)], BackupOptions(opener=opener, full_scan=True))
     assert len(opener.opened) == 5
-    assert result.snapshot.summary["data_added"] < 2000  # 只有新的 tree 中繼資料
+    # 檔案內容全部去重；新增的只能是目錄中繼資料（上層目錄的 mtime 可能改變，
+    # 例如 Windows 的暫存目錄很深且持續有其他程式寫入）
+    new_blobs = set(small_repo.index.blob_ids()) - before
+    assert {small_repo.index.get(b).type for b in new_blobs} <= {BlobType.TREE}
 
 
 def test_incremental_snapshot_restores_latest_content(small_repo, tmp_path):

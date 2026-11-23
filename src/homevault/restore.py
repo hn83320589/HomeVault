@@ -109,10 +109,13 @@ class _Restorer:
         except BaseException:
             partial.unlink(missing_ok=True)
             raise
-        os.utime(path, ns=(node.mtime_ns, node.mtime_ns))
-        _apply_mode(path, node.mode)
         self.result.files += 1
         self.result.bytes += node.size
+        try:
+            os.utime(path, ns=(node.mtime_ns, node.mtime_ns))
+            _apply_mode(path, node.mode)
+        except OSError as exc:
+            self.error(f"{path} 已還原，但無法設定修改時間或權限：{exc}")
 
     def _restore_symlink(self, node: Node, path: Path) -> None:
         if os.path.lexists(path):
@@ -121,7 +124,7 @@ class _Restorer:
                 self.error(f"{path} 已存在，略過（使用 --overwrite 覆寫）")
                 return
             path.unlink()
-        os.symlink(node.target or "", path)
+        os.symlink(node.target or "", path, target_is_directory=node.target_is_dir)
         if os.utime in os.supports_follow_symlinks:
             os.utime(path, ns=(node.mtime_ns, node.mtime_ns), follow_symlinks=False)
         self.result.symlinks += 1
@@ -165,15 +168,16 @@ def run_restore(
     * 未指定 subpath：還原整個快照，保留完整路徑結構。
     * 指定 subpath：把該資料夾或檔案本身放到 target 底下。
     """
-    if not repo.index_loaded:
+    # 共享鎖：避免另一台電腦同時 prune，還原到一半才發現資料被移走
+    with repo.lock(exclusive=False):
         repo.load_index(recover_orphans=False)
-    target_path = Path(target)
-    target_path.mkdir(parents=True, exist_ok=True)
-    node = find_node(repo, snapshot, subpath)
-    restorer = _Restorer(repo, overwrite)
-    if node.name == "":
-        restorer.restore_children(node.subtree or b"", target_path)
-    else:
-        restorer.restore_node(node, target_path)
-    restorer.finalize_dirs()
+        node = find_node(repo, snapshot, subpath)
+        target_path = Path(target)
+        target_path.mkdir(parents=True, exist_ok=True)
+        restorer = _Restorer(repo, overwrite)
+        if node.name == "":
+            restorer.restore_children(node.subtree or b"", target_path)
+        else:
+            restorer.restore_node(node, target_path)
+        restorer.finalize_dirs()
     return restorer.result

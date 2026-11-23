@@ -23,11 +23,11 @@ from homevault.errors import IntegrityError
 from homevault.index import Index, PackMap
 from homevault.pack import decode_blob, pack_name, read_pack_header
 from homevault.repository import Repository
-from homevault.storage import TMP_DIR
 
 log = logging.getLogger("homevault")
 
 DEFAULT_REPACK_THRESHOLD = 0.2
+TMP_MAX_AGE_PRUNE = 3600
 _INDEX_FILE_MAX_ENTRIES = 50_000
 
 
@@ -118,7 +118,7 @@ def _write_index_files(repo: Repository, packs: PackMap) -> None:
 def run_prune(
     repo: Repository, *, threshold: float = DEFAULT_REPACK_THRESHOLD, dry_run: bool = False
 ) -> PruneResult:
-    with repo.lock(exclusive=True):
+    with repo.lock(exclusive=True) as lock:
         # ① 現有 index 與 pack
         packs, old_index_names = _all_packs(repo)
         index = Index()
@@ -167,12 +167,14 @@ def run_prune(
         # ⑤ 保留的舊 pack 寫入新的 index
         _write_index_files(repo, {p: packs[p] for p in plan.keep})
 
-        # ⑥ 刪除舊 index → ⑦ 刪除不需要的 pack
+        # ⑥ 刪除舊 index → ⑦ 刪除不需要的 pack（之前確認 lock 仍然有效）
+        lock.check_held()
         for name in old_index_names:
             repo.backend.delete(name)
+        lock.check_held()
         for pack_id in [*plan.delete, *plan.repack]:
             repo.backend.delete(pack_name(pack_id))
-        for name in repo.backend.list(TMP_DIR):  # 持有獨佔鎖，沒有其他行程在寫
-            repo.backend.delete(name)
+        # 只清除舊的暫存檔：另一台電腦可能正在寫 lock 的暫存檔
+        repo.backend.clean_tmp(TMP_MAX_AGE_PRUNE)
         result.size_after = _repo_data_size(repo)
     return result

@@ -254,3 +254,34 @@ def test_find_node_accepts_windows_drive_paths(small_repo):
 
 def test_path_components_for_posix_paths():
     assert path_components("/Users/mom/Pictures") == ["Users", "mom", "Pictures"]
+
+
+def test_backup_falls_back_to_full_read_when_parent_tree_is_damaged(small_repo, tmp_path):
+    """上一個快照的根 tree 損毀時，備份改為完整讀取，而不是每次都失敗。"""
+    from homevault.pack import pack_name
+
+    src = make_tree(tmp_path / "src")
+    first = run_backup(small_repo, [str(src)])
+    entry = small_repo.index.get(first.snapshot.tree)
+    os.remove(small_repo.backend.root / pack_name(entry.pack_id))
+
+    repo = Repository.open(small_repo.backend.root, PASSWORD)
+    result = run_backup(repo, [str(src)])
+    restored = run_restore(repo, result.snapshot, str(src), tmp_path / "out")
+    assert restored.errors == []
+    assert file_manifest(tmp_path / "out" / "src") == file_manifest(src)
+
+
+@pytest.mark.skipif(not can_symlink, reason="Windows 建立符號連結需要權限")
+def test_symlink_to_directory_records_directory_flag(small_repo, tmp_path):
+    from homevault.restore import find_node
+
+    src = make_tree(tmp_path / "src")
+    os.symlink("docs", src / "docs-link")
+    result = run_backup(small_repo, [str(src)])
+    node = find_node(small_repo, result.snapshot, f"{src}/docs-link")
+    assert node.target == "docs"
+    assert node.target_is_dir
+    assert not find_node(small_repo, result.snapshot, f"{src}/link-to-notes").target_is_dir
+    run_restore(small_repo, result.snapshot, str(src), tmp_path / "out")
+    assert os.readlink(tmp_path / "out" / "src" / "docs-link") == "docs"

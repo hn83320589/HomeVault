@@ -22,6 +22,10 @@ from homevault.platform_utils import fsync_dir, fsync_fd, replace_durable
 TMP_DIR = "tmp"
 
 
+def _raise(exc: OSError) -> None:
+    raise exc
+
+
 class ObjectMissingError(IntegrityError):
     """備份庫中應該存在的檔案不見了。"""
 
@@ -60,7 +64,8 @@ class LocalBackend:
                 self._check_root()
                 return []
             names = []
-            for dirpath, _dirnames, filenames in os.walk(base):
+            # os.walk 預設會吞掉讀取錯誤並回傳不完整的結果；不完整的快照清單會讓 prune 誤刪資料
+            for dirpath, _dirnames, filenames in os.walk(base, onerror=_raise):
                 rel_dir = Path(dirpath).relative_to(self.root).as_posix()
                 names.extend(f"{rel_dir}/{fn}" for fn in filenames)
             return sorted(names)

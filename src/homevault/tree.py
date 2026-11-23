@@ -27,6 +27,7 @@ class Node:
     chunks: list[bytes] = field(default_factory=list)
     subtree: bytes | None = None
     target: str | None = None
+    target_is_dir: bool = False
 
     def to_dict(self) -> dict[str, object]:
         d: dict[str, object] = {
@@ -42,6 +43,8 @@ class Node:
             d["subtree"] = self.subtree.hex() if self.subtree else None
         elif self.type == SYMLINK:
             d["target"] = self.target
+            if self.target_is_dir:  # 只在為 True 時寫入，既有 tree 的內容與 id 不變
+                d["dir"] = True
         return d
 
     @classmethod
@@ -63,6 +66,7 @@ class Node:
             chunks=[bytes.fromhex(c) for c in d.get("chunks", [])],
             subtree=bytes.fromhex(subtree) if subtree else None,
             target=d.get("target"),
+            target_is_dir=bool(d.get("dir", False)),
         )
 
 

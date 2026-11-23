@@ -66,8 +66,8 @@ class _Differ:
 
 
 def diff_snapshots(repo: Repository, a: Snapshot, b: Snapshot) -> list[DiffEntry]:
-    if not repo.index_loaded:
+    with repo.lock(exclusive=False):
         repo.load_index(recover_orphans=False)
-    differ = _Differ(repo)
-    differ.trees(a.tree, b.tree, "")
+        differ = _Differ(repo)
+        differ.trees(a.tree, b.tree, "")
     return differ.entries

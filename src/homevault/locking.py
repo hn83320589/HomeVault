@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -22,7 +23,7 @@ from dataclasses import asdict, dataclass
 from homevault.crypto import MasterKey, seal, unseal
 from homevault.errors import IntegrityError, RepositoryLockedError
 from homevault.platform_utils import pid_alive
-from homevault.storage import LocalBackend
+from homevault.storage import LocalBackend, ObjectMissingError
 
 log = logging.getLogger("homevault")
 
@@ -74,6 +75,8 @@ class Lock:
         self._name: str | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._mutex = threading.Lock()  # refresh 執行緒與 check_held 不可同時更新
+        self.lost = False
 
     def __enter__(self) -> Lock:
         self.acquire()
@@ -115,17 +118,45 @@ class Lock:
         self._backend.write_atomic(name, seal(self._key.enc_key, payload, _AAD))
         return name
 
+    def check_held(self) -> None:
+        """在提交快照、刪除資料等關鍵步驟之前呼叫，確認 lock 仍然有效。
+
+        電腦睡眠或硬碟卡住時，refresh 可能延遲超過 STALE_AFTER，另一台電腦就會把
+        我們的 lock 當成殘留刪除，並開始 prune。所以：太久沒更新就立刻補更新，
+        補更新時發現舊 lock 已被刪除，代表 lock 已失效，必須中止。
+        """
+        with self._mutex:
+            if not self.lost and time.time() - self.info.refreshed > REFRESH_EVERY:
+                self._refresh_locked()
+            if not self.lost and (self._name is None or not self._backend.exists(self._name)):
+                self.lost = True
+            if self.lost:
+                raise RepositoryLockedError(
+                    "lock 已失效：本次執行期間，另一台電腦把這次操作的 lock 判定為殘留並移除"
+                    "（可能是電腦睡眠或硬碟停頓太久）。為了安全已中止，請重新執行。"
+                )
+
+    def _refresh_locked(self) -> None:
+        old = self._name
+        self.info.refreshed = time.time()
+        self._name = self._write()
+        if old:
+            try:
+                self._backend.delete(old)
+            except ObjectMissingError:
+                self.lost = True  # 舊 lock 已被別人刪除：在這段期間我們沒有受到保護
+
     def _refresh_loop(self) -> None:
         while not self._stop.wait(REFRESH_EVERY):
             try:
-                old = self._name
-                self.info.refreshed = time.time()
-                self._name = self._write()
-                if old:
-                    self._backend.delete(old)
-            except BaseException as exc:  # 包含測試中的模擬當機
-                log.warning("更新 lock 失敗：%s", exc)
-                return
+                with self._mutex:
+                    if self.lost:
+                        return
+                    self._refresh_locked()
+            except Exception as exc:
+                log.warning("更新 lock 失敗，稍後重試：%s", exc)  # 例如硬碟暫時無回應
+            except BaseException:
+                return  # 測試中的模擬當機：行程已不存在
 
     def _remove_stale_and_check_conflicts(self) -> None:
         for name, info in read_locks(self._backend, self._key):
@@ -133,7 +164,9 @@ class Lock:
                 continue
             if info is None or is_stale(info):
                 log.info("移除殘留的 lock：%s", info.describe() if info else name)
-                self._backend.delete(name)
+                # 另一台電腦可能同時清掉了同一個殘留 lock
+                with contextlib.suppress(ObjectMissingError):
+                    self._backend.delete(name)
                 continue
             if self.info.exclusive or info.exclusive:
                 raise RepositoryLockedError(

@@ -46,9 +46,10 @@ def plan_forget(snapshots: list[tuple[bytes, Snapshot]], policy: KeepPolicy) -> 
 def run_forget(repo: Repository, policy: KeepPolicy, *, dry_run: bool = False) -> list[ForgetGroup]:
     if policy.is_empty():
         raise UsageError("請至少指定一條保留規則（例如 --keep-daily 7），避免誤刪所有快照")
-    with repo.lock(exclusive=True):
+    with repo.lock(exclusive=True) as lock:
         plans = plan_forget(repo.list_snapshots(), policy)
         if not dry_run:
+            lock.check_held()
             for group in plans:
                 for sid, _snap in group.remove:
                     repo.delete_snapshot(sid)

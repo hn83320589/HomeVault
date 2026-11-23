@@ -25,7 +25,7 @@ from pathlib import PurePath
 from typing import BinaryIO
 
 from homevault.chunker import Chunker
-from homevault.errors import UsageError
+from homevault.errors import IntegrityError, UsageError
 from homevault.pack import BlobType
 from homevault.repository import TMP_MAX_AGE, Repository
 from homevault.snapshot import Snapshot
@@ -295,7 +295,14 @@ class _Archiver:
         except OSError as exc:
             self._error(f"無法讀取符號連結 {path}：{exc}")
             return None
-        return Node(name, SYMLINK, mode=st.st_mode, mtime_ns=st.st_mtime_ns, target=target)
+        return Node(
+            name,
+            SYMLINK,
+            mode=st.st_mode,
+            mtime_ns=st.st_mtime_ns,
+            target=target,
+            target_is_dir=os.path.isdir(path),  # Windows 還原時需要區分目錄連結
+        )
 
     # ── 檔案 ─────────────────────────────────────────────
 
@@ -398,14 +405,19 @@ def run_backup(
     progress = progress or Progress()
     paths = normalize_sources(sources)
     hostname = options.hostname or socket.gethostname()
-    with repo.lock(exclusive=False):
+    with repo.lock(exclusive=False) as lock:
         repo.backend.clean_tmp(TMP_MAX_AGE)
         recovered = repo.load_index(recover_orphans=True)
         if recovered:
             log.info("沿用上次中斷時已寫入的 %d 個 pack", len(recovered))
         stats_before = dataclasses.replace(repo.stats)
         parent = find_parent(repo, hostname, paths)
-        parent_root = repo.load_tree(parent[1].tree) if parent else None
+        parent_root = None
+        if parent:
+            try:
+                parent_root = repo.load_tree(parent[1].tree)
+            except IntegrityError as exc:
+                log.warning("上一個快照的目錄資料無法讀取，本次改為完整讀取：%s", exc)
 
         archiver = _Archiver(repo, options, progress)
         try:
@@ -415,7 +427,9 @@ def run_backup(
             raise
         finally:
             archiver.close()
+        lock.check_held()
         repo.flush()
+        lock.check_held()  # 寫 pack 與 index 期間也可能失去 lock
 
         snapshot = Snapshot(
             time=datetime.now().astimezone().isoformat(),
@@ -439,6 +453,7 @@ def run_backup(
                 "duration": round(progress.elapsed, 3),
             },
         )
+        lock.check_held()
         snap_id = repo.save_snapshot(snapshot)  # ← commit point
     return BackupResult(
         snapshot_id=snap_id,

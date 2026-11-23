@@ -38,6 +38,11 @@ def _snapshot_blobs(repo: Repository, snap: Snapshot) -> set[bytes]:
 
 
 def run_stats(repo: Repository) -> RepoStats:
+    with repo.lock(exclusive=False):
+        return _collect(repo)
+
+
+def _collect(repo: Repository) -> RepoStats:
     repo.load_index(recover_orphans=False)
     stats = RepoStats()
     for directory in ("data", "index", "snapshots", "keys", "locks"):

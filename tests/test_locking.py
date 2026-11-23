@@ -5,7 +5,7 @@ import time
 import pytest
 
 from homevault.errors import RepositoryLockedError
-from homevault.locking import STALE_AFTER, Lock, read_locks
+from homevault.locking import REFRESH_EVERY, STALE_AFTER, Lock, read_locks
 
 
 @pytest.fixture
@@ -86,3 +86,80 @@ def test_lock_refresh_updates_timestamp(repo, monkeypatch):
         infos = [i for _, i in read_locks(repo.backend, repo.key)]
         assert len(infos) == 1
         assert infos[0].refreshed > first
+
+
+def test_check_held_detects_lock_removed_by_other_computer(repo):
+    """另一台電腦把我們的 lock 當成殘留刪掉後，必須在下一個關鍵步驟前察覺。"""
+    with repo.lock(exclusive=False) as lock:
+        lock.check_held()
+        repo.backend.delete(lock._name)
+        with pytest.raises(RepositoryLockedError, match="lock 已失效"):
+            lock.check_held()
+
+
+def test_check_held_after_sleep_refreshes_and_detects_loss(repo, monkeypatch):
+    """電腦睡眠超過更新間隔：先補一次更新；舊 lock 已被別人刪除就判定失效。"""
+    with repo.lock(exclusive=False) as lock:
+        lock.info.refreshed -= REFRESH_EVERY + 1
+        old_name = lock._name
+        lock.check_held()  # 舊 lock 還在：補更新即可
+        assert lock._name != old_name
+        assert lock.info.refreshed > time.time() - 5
+
+        lock.info.refreshed -= REFRESH_EVERY + 1
+        repo.backend.delete(lock._name)
+        with pytest.raises(RepositoryLockedError):
+            lock.check_held()
+
+
+def test_backup_aborts_without_snapshot_when_lock_is_lost(repo, tmp_path):
+    """情境：Mac 備份中途睡眠，Windows 的 prune 刪掉其 lock 與尚未被引用的 pack。"""
+    from conftest import write_file
+
+    from homevault.backup import BackupOptions, run_backup
+    from homevault.locking import LOCK_DIR
+
+    src = tmp_path / "src"
+    for i in range(3):
+        write_file(src / f"f{i}.bin", b"x" * 1000 + bytes([i]))
+
+    def opener(path):
+        for name in repo.backend.list(LOCK_DIR):  # 模擬另一台電腦移除了 lock
+            repo.backend.delete(name)
+        return open(path, "rb")
+
+    with pytest.raises(RepositoryLockedError):
+        run_backup(repo, [str(src)], BackupOptions(opener=opener, threads=1))
+    assert repo.list_snapshot_ids() == []
+
+
+def test_concurrent_removal_of_same_stale_lock_is_tolerated(repo, monkeypatch):
+    other_host_lock(repo, exclusive=True, age=STALE_AFTER + 60)
+    from homevault import locking
+
+    real_read = locking.read_locks
+
+    def read_then_vanish(backend, key):
+        result = real_read(backend, key)
+        for name, _ in result:  # 另一台電腦搶先刪掉了同一個殘留 lock
+            backend.delete(name)
+        return result
+
+    monkeypatch.setattr(locking, "read_locks", read_then_vanish)
+    lock = repo.lock(exclusive=True)
+    lock._remove_stale_and_check_conflicts()
+
+
+def test_restore_is_blocked_while_other_computer_prunes(repo, tmp_path):
+    """還原時取得共享鎖：另一台電腦正在 prune 時拒絕，而不是還原到一半才失敗。"""
+    from conftest import write_file
+
+    from homevault.backup import run_backup
+    from homevault.restore import run_restore
+
+    src = tmp_path / "src"
+    write_file(src / "a.txt", b"a")
+    result = run_backup(repo, [str(src)])
+    other_host_lock(repo, exclusive=True)
+    with pytest.raises(RepositoryLockedError):
+        run_restore(repo, result.snapshot, "", tmp_path / "out")

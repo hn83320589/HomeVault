@@ -211,10 +211,15 @@ def _resolve(repo, ref: str):
 
 
 def cmd_ls(args: argparse.Namespace) -> int:
+    repo = open_repo(args)
+    with repo.lock(exclusive=False):
+        return _list_snapshot(repo, args)
+
+
+def _list_snapshot(repo, args: argparse.Namespace) -> int:
     from homevault.restore import find_node
     from homevault.tree import DIR, SYMLINK
 
-    repo = open_repo(args)
     repo.load_index(recover_orphans=False)
     _sid, snap, path = _resolve(repo, args.target)
     node = find_node(repo, snap, path)

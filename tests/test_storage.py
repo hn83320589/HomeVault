@@ -73,3 +73,16 @@ def test_clean_tmp_removes_only_old_files(backend):
     assert backend.clean_tmp(max_age_seconds=86400) == 1
     assert not old.exists()
     assert new.exists()
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="需要 POSIX 權限模型")
+def test_list_raises_instead_of_returning_partial_results(backend):
+    """目錄讀取錯誤不可被吞掉：不完整的快照清單會讓 prune 誤刪資料。"""
+    backend.write_atomic("snapshots/aa", b"1")
+    unreadable = backend.root / "snapshots"
+    os.chmod(unreadable, 0)
+    try:
+        with pytest.raises(RepositoryUnavailableError):
+            backend.list("snapshots")
+    finally:
+        os.chmod(unreadable, 0o755)

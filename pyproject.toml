@@ -3,6 +3,8 @@ name = "homevault"
 version = "0.1.0"
 description = "家用增量備份工具：內容定義切塊去重、加密、中斷安全"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "DADA", email = "hn83320589@gmail.com" }
 ]

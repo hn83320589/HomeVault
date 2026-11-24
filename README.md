@@ -1,5 +1,10 @@
 # HomeVault 家用增量備份工具
 
+[![CI](https://github.com/hn83320589/HomeVault/actions/workflows/ci.yml/badge.svg)](https://github.com/hn83320589/HomeVault/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)
+![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey)
+
 為家用電腦設計的增量備份工具：以內容定義切塊（FastCDC）去重、AES-256-GCM 加密，
 備份庫放在外接硬碟（exFAT）上，Windows 與 macOS 共用同一個備份庫。
 任何時候按 Ctrl+C、拔掉硬碟或斷電，備份庫都不會損毀。
@@ -11,6 +16,41 @@
 - 保留政策（每日、每週、每月、每年）與空間回收（prune 會重新打包部分使用的 pack）
 
 > 完整的系統分析與架構設計請見 [docs/design.md](docs/design.md)。
+
+### 中斷安全的核心：寫入順序
+
+**backup：被引用者先寫，snapshot 最後寫，作為 commit point。** 在 commit 之前任何時間點中斷，
+都只會留下沒有被引用的 pack；這些 pack 下次備份會被沿用，既有快照完全不受影響。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as backup
+    participant R as 備份庫（exFAT 外接硬碟）
+    B->>R: 驗證密碼（此前不寫入任何東西）
+    B->>R: 寫入 pack（tmp → fsync → rename）
+    B->>R: 每 64 個 pack 寫入 index checkpoint
+    B->>R: 寫入最後的 pack 與 index
+    B->>R: 確認 lock 仍有效，寫入 snapshot ← commit point
+    Note over B,R: commit 前中斷：只留下未被引用的 pack，重跑時讀取其 header 沿用
+```
+
+**prune：先刪舊 index（⑥），再刪 pack（⑦）。** 順序反過來時，若在兩者之間中斷，
+舊 index 會指向已刪除的 pack，下次備份去重時引用到不存在的資料，造成無聲的資料遺失，
+這是去重型備份工具最經典的 bug。
+
+```mermaid
+sequenceDiagram
+    participant P as prune
+    participant R as 備份庫
+    P->>R: ① 取得獨佔鎖，列出現有的舊 index
+    P->>R: ② 走訪所有快照，找出仍在使用的區塊（讀不到任何快照就中止）
+    P->>R: ④ 重新打包：驗證後寫入新 pack
+    P->>R: ⑤ 寫入涵蓋所有保留區塊的新 index
+    P->>R: ⑥ 刪除舊 index
+    P->>R: ⑦ 刪除不再需要的 pack
+    Note over P,R: 任何一步中斷，每個仍被引用的區塊都在某個被索引的 pack 中
+```
 
 ---
 
@@ -36,7 +76,7 @@
 需求：Python 3.12 以上，以及 [uv](https://docs.astral.sh/uv/)。相依版本鎖定在 `uv.lock`。
 
 ```bash
-git clone <repo-url> HomeVault
+git clone https://github.com/hn83320589/HomeVault.git
 cd HomeVault
 uv sync                    # 依 uv.lock 建立虛擬環境並安裝鎖定的相依版本
 uv run homevault --help    # 在專案內執行
@@ -520,3 +560,9 @@ uv run ruff check . && uv run ruff format --check .
 - **Windows 上刪除檔案的持久性：** Windows 無法對目錄做 fsync。forget 刪除快照後若立刻斷電，被刪除的快照檔有機會「復活」；若它引用的資料已被 prune 移除，之後的 prune 會中止並提示先執行 check，需要再 forget 一次該快照。既有、未被 forget 的快照不受影響。
 - **主機名稱變動：** parent 快照與保留政策依主機名稱分組。macOS 的主機名稱可能隨網路環境改變（例如 `.local` 與 `.lan`），此時會失去增量判斷（改為完整讀取，但去重仍然有效）。可以用 `--host` 固定名稱。
 - **斷電模型：** 故障注入的斷電模式只模擬「沒有 fsync 的檔案內容遺失」，沒有模擬檔案系統中繼資料本身的損毀。exFAT 本身的損毀由讀取端的驗證處理：不完整的檔案會被視為不存在。
+
+---
+
+## 授權
+
+[MIT License](LICENSE)

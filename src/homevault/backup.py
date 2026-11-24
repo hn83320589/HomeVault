@@ -100,7 +100,13 @@ class BackupResult:
     files_changed: int = 0
     files_unmodified: int = 0
     dirs: int = 0
-    errors: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)  # 無法備份、也沒有舊版本可沿用
+    stale: list[tuple[str, str]] = field(default_factory=list)  # (路徑, 沿用的版本時間)
+    changing: list[str] = field(default_factory=list)  # 備份時持續變動的檔案
+
+    @property
+    def has_problems(self) -> bool:
+        return bool(self.errors or self.stale or self.changing)
 
 
 class ExcludeMatcher:
@@ -148,15 +154,24 @@ def path_components(path: str) -> list[str]:
 
 
 class _Archiver:
-    def __init__(self, repo: Repository, options: BackupOptions, progress: Progress) -> None:
+    def __init__(
+        self,
+        repo: Repository,
+        options: BackupOptions,
+        progress: Progress,
+        parent_time: str | None = None,
+    ) -> None:
         self.repo = repo
+        self.parent_time = parent_time
         self.opt = options
         self.progress = progress
         self.chunker = Chunker(repo.key.chunker_seed, repo.config.chunker)
         self.excludes = ExcludeMatcher(options.excludes)
         self.repo_root = os.path.normcase(os.path.abspath(repo.backend.root))
         self.result_errors: list[str] = []
-        self.counts = {"new": 0, "changed": 0, "unmodified": 0, "dirs": 0}
+        self.stale: list[tuple[str, str]] = []
+        self.changing: list[str] = []
+        self.counts = {"new": 0, "changed": 0, "unmodified": 0, "dirs": 0, "stale": 0}
         self._counts_lock = threading.Lock()
         self._cancelled = threading.Event()
         self._pool = ThreadPoolExecutor(max_workers=max(1, options.threads))
@@ -177,6 +192,29 @@ class _Archiver:
         log.warning(message)
         with self._counts_lock:
             self.result_errors.append(message)
+
+    def _reuse_previous(
+        self, path: str, name: str, parent: Node | None, reason: str
+    ) -> Node | None:
+        """讀取失敗時沿用上一個快照的版本，避免檔案或資料夾從快照中消失。
+
+        例如每晚 11 點都開著的 Outlook 資料檔：若直接略過，它會從之後的每個快照
+        消失，舊快照被 forget 之後就完全沒有備份。沿用舊版本讓最新快照持續引用它。
+        """
+        usable = (
+            parent is not None
+            and (parent.type != FILE or all(self.repo.has_blob(c) for c in parent.chunks))
+            and (parent.type != DIR or (parent.subtree and self.repo.has_blob(parent.subtree)))
+        )
+        if not usable:
+            self._error(f"無法讀取 {path}：{reason}（從未成功備份過，本次略過）")
+            return None
+        since = parent.stale_since or self.parent_time or "未知時間"
+        log.warning("無法讀取 %s：%s（沿用 %s 的版本）", path, reason, since)
+        with self._counts_lock:
+            self.stale.append((path, since))
+            self.counts["stale"] += 1
+        return dataclasses.replace(parent, name=name, stale_since=since)
 
     # ── 走訪 ─────────────────────────────────────────────
 
@@ -223,7 +261,7 @@ class _Archiver:
     def _source_node(self, path: str, name: str, parent: Node | None) -> Node | None:
         st = os.lstat(path)
         if stat.S_ISLNK(st.st_mode):
-            return self._symlink_node(path, name, st)
+            return self._symlink_node(path, name, st, parent)
         if stat.S_ISDIR(st.st_mode):
             return self._dir_node(path, name, st, "", parent)
         future = self._file_future(path, name, st, parent)
@@ -247,7 +285,9 @@ class _Archiver:
             with os.scandir(path) as it:
                 entries = sorted(it, key=lambda e: e.name)
         except OSError as exc:
-            self._error(f"無法讀取資料夾 {path}：{exc}")
+            reused = self._reuse_previous(path, name, parent, str(exc))
+            if reused:
+                return reused
             entries = []
 
         pending: list[Future[Node | None]] = []
@@ -258,7 +298,11 @@ class _Archiver:
             try:
                 est = entry.stat(follow_symlinks=False)
             except OSError as exc:
-                self._error(f"無法讀取 {entry.path}：{exc}")
+                reused = self._reuse_previous(
+                    entry.path, entry.name, parent_map.get(entry.name), str(exc)
+                )
+                if reused:
+                    nodes.append(reused)
                 continue
             is_link = stat.S_ISLNK(est.st_mode) or _is_junction(entry)
             is_dir = stat.S_ISDIR(est.st_mode) and not is_link
@@ -268,7 +312,7 @@ class _Archiver:
                 continue  # 備份庫位於來源資料夾內時，不可把備份庫備份進自己
             child_parent = parent_map.get(entry.name)
             if is_link:
-                node = self._symlink_node(entry.path, entry.name, est)
+                node = self._symlink_node(entry.path, entry.name, est, child_parent)
                 if node:
                     nodes.append(node)
             elif is_dir:
@@ -289,12 +333,13 @@ class _Archiver:
         tree_id = self.repo.save_tree(nodes)
         return Node(name, DIR, mode=st.st_mode, mtime_ns=st.st_mtime_ns, subtree=tree_id)
 
-    def _symlink_node(self, path: str, name: str, st: os.stat_result) -> Node | None:
+    def _symlink_node(
+        self, path: str, name: str, st: os.stat_result, parent: Node | None = None
+    ) -> Node | None:
         try:
             target = os.readlink(path)
         except OSError as exc:
-            self._error(f"無法讀取符號連結 {path}：{exc}")
-            return None
+            return self._reuse_previous(path, name, parent, str(exc))
         return Node(
             name,
             SYMLINK,
@@ -315,6 +360,7 @@ class _Archiver:
             and parent.type == FILE
             and parent.size == st.st_size
             and parent.mtime_ns == st.st_mtime_ns
+            and not parent.changing  # 上次讀到的內容可能不一致，必須重讀
             and all(self.repo.has_blob(c) for c in parent.chunks)
         ):
             self._count("unmodified")
@@ -333,37 +379,63 @@ class _Archiver:
             return done
         self._slots.acquire()
         try:
-            future = self._pool.submit(self._store_file, path, name, st, parent is not None)
+            future = self._pool.submit(self._store_file, path, name, st, parent)
         except BaseException:
             self._slots.release()
             raise
         future.add_done_callback(lambda _f: self._slots.release())
         return future
 
-    def _store_file(self, path: str, name: str, st: os.stat_result, existed: bool) -> Node | None:
+    def _read_chunks(self, path: str) -> tuple[list[bytes], int]:
         chunks: list[bytes] = []
         size = 0
-        try:
-            with self.opt.opener(path) as f:
-                for chunk in self.chunker.iter_chunks(f):
-                    if self._cancelled.is_set():
-                        raise BackupCancelledError
-                    blob_id, stored = self.repo.save_blob(BlobType.DATA, chunk)
-                    chunks.append(blob_id)
-                    size += len(chunk)
-                    self.progress.add_read(len(chunk), stored, stored > 0)
-        except OSError as exc:
-            self._error(f"無法讀取檔案 {path}：{exc}（已略過）")
-            return None
-        try:
-            after = os.stat(path)
-            if after.st_mtime_ns != st.st_mtime_ns or after.st_size != size:
-                log.warning("檔案在備份過程中被修改：%s（已保存讀取到的內容）", path)
-        except OSError:
-            pass
-        self._count("changed" if existed else "new")
+        with self.opt.opener(path) as f:
+            for chunk in self.chunker.iter_chunks(f):
+                if self._cancelled.is_set():
+                    raise BackupCancelledError
+                blob_id, stored = self.repo.save_blob(BlobType.DATA, chunk)
+                chunks.append(blob_id)
+                size += len(chunk)
+                self.progress.add_read(len(chunk), stored, stored > 0)
+        return chunks, size
+
+    def _store_file(
+        self, path: str, name: str, st: os.stat_result, parent: Node | None
+    ) -> Node | None:
+        """讀取檔案。讀取前後的 size 與 mtime 不同代表讀取期間被修改，重讀一次；
+        仍然在變動就保存讀到的內容並標記 changing，下次備份一定重讀。"""
+        changing = False
+        for attempt in range(2):
+            try:
+                chunks, size = self._read_chunks(path)
+            except OSError as exc:
+                return self._reuse_previous(path, name, parent, str(exc))
+            try:
+                after = os.stat(path)
+            except OSError:
+                break  # 讀完後檔案被刪除：保存讀到的內容
+            if after.st_mtime_ns == st.st_mtime_ns and after.st_size == size:
+                break
+            if attempt == 0:
+                log.info("檔案在讀取期間被修改，重新讀取：%s", path)
+                st = after
+            else:
+                changing = True
+        if changing:
+            log.warning("檔案在備份過程中持續被修改：%s（保存的內容可能不一致）", path)
+            with self._counts_lock:
+                self.changing.append(path)
+        self._count("changed" if parent is not None else "new")
         self.progress.add_file(size, was_read=True)
-        return Node(name, FILE, mode=st.st_mode, mtime_ns=st.st_mtime_ns, size=size, chunks=chunks)
+        return Node(
+            name,
+            FILE,
+            mode=st.st_mode,
+            mtime_ns=st.st_mtime_ns,
+            size=size,
+            chunks=chunks,
+            changing=changing,
+        )
 
 
 def _is_junction(entry: os.DirEntry[str]) -> bool:
@@ -419,7 +491,7 @@ def run_backup(
             except IntegrityError as exc:
                 log.warning("上一個快照的目錄資料無法讀取，本次改為完整讀取：%s", exc)
 
-        archiver = _Archiver(repo, options, progress)
+        archiver = _Archiver(repo, options, progress, parent[1].time if parent else None)
         try:
             root_tree = archiver.backup_root(paths, parent_root)
         except BaseException:
@@ -450,6 +522,11 @@ def run_backup(
                     repo.stats.stored_bytes_added - stats_before.stored_bytes_added
                 ),
                 "errors": len(archiver.result_errors),
+                "files_stale": len(archiver.stale),
+                "files_changing": len(archiver.changing),
+                # 只保留前 100 筆，避免大量無法讀取的檔案讓快照檔過大
+                "stale_files": [{"path": p, "since": t} for p, t in archiver.stale[:100]],
+                "changing_files": archiver.changing[:100],
                 "duration": round(progress.elapsed, 3),
             },
         )
@@ -464,4 +541,6 @@ def run_backup(
         files_unmodified=archiver.counts["unmodified"],
         dirs=archiver.counts["dirs"],
         errors=archiver.result_errors,
+        stale=archiver.stale,
+        changing=archiver.changing,
     )

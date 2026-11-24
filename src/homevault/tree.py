@@ -28,6 +28,10 @@ class Node:
     subtree: bytes | None = None
     target: str | None = None
     target_is_dir: bool = False
+    # 讀取失敗而沿用舊版本時，記錄該版本是在哪個快照時間讀到的
+    stale_since: str | None = None
+    # 備份時檔案持續被修改，保存的內容可能不一致
+    changing: bool = False
 
     def to_dict(self) -> dict[str, object]:
         d: dict[str, object] = {
@@ -45,6 +49,10 @@ class Node:
             d["target"] = self.target
             if self.target_is_dir:  # 只在為 True 時寫入，既有 tree 的內容與 id 不變
                 d["dir"] = True
+        if self.stale_since:
+            d["stale_since"] = self.stale_since
+        if self.changing:
+            d["changing"] = True
         return d
 
     @classmethod
@@ -67,6 +75,8 @@ class Node:
             subtree=bytes.fromhex(subtree) if subtree else None,
             target=d.get("target"),
             target_is_dir=bool(d.get("dir", False)),
+            stale_since=d.get("stale_since"),
+            changing=bool(d.get("changing", False)),
         )
 
 

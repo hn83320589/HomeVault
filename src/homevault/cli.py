@@ -180,10 +180,29 @@ def cmd_backup(args: argparse.Namespace) -> int:
     out(f"  讀取：{fmt_bytes(progress.bytes_read)}，速度 {speed}/s")
     out(f"  新增資料：{added}（壓縮加密後 {stored}），去重率 {progress.dedup_ratio:.1%}")
     out(f"  耗時：{elapsed:.1f} 秒")
+    if result.stale:
+        out(f"⚠ {len(result.stale)} 個項目無法讀取（可能正被其他程式開啟），沿用先前的版本：")
+        for path, since in result.stale:
+            out(f"    {path}（{_stale_age(since)}）")
+    if result.changing:
+        out(f"⚠ {len(result.changing)} 個檔案在備份過程中持續被修改，保存的內容可能不一致：")
+        for path in result.changing:
+            out(f"    {path}（下次備份會重新讀取）")
     if result.errors:
-        out(f"  ⚠ 有 {len(result.errors)} 個項目無法備份，詳見上方警告")
-        return 3
-    return 0
+        out(f"⚠ {len(result.errors)} 個項目無法備份，且沒有先前的版本可沿用：")
+        for message in result.errors:
+            out(f"    {message}")
+    return 3 if result.has_problems else 0
+
+
+def _stale_age(since: str) -> str:
+    """「自 2026-11-20 起無法更新，已 3 天」。"""
+    try:
+        then = datetime.fromisoformat(since)
+    except ValueError:
+        return f"沿用 {since} 的版本"
+    days = (datetime.now(then.tzinfo) - then).days
+    return f"自 {then:%Y-%m-%d} 起無法更新，已 {days} 天"
 
 
 def cmd_snapshots(args: argparse.Namespace) -> int:
@@ -197,9 +216,21 @@ def cmd_snapshots(args: argparse.Namespace) -> int:
         out(
             f"{short_id(sid):<10}{fmt_time(snap.time):<21}{snap.hostname:<18}{size:>12}  "
             + ", ".join(snap.paths)
+            + _snapshot_warnings(snap.summary)
         )
     out(f"共 {len(snaps)} 個快照")
     return 0
+
+
+def _snapshot_warnings(summary: dict) -> str:
+    notes = []
+    if summary.get("files_stale"):
+        notes.append(f"沿用舊版 {summary['files_stale']}")
+    if summary.get("files_changing"):
+        notes.append(f"內容變動 {summary['files_changing']}")
+    if summary.get("errors"):
+        notes.append(f"未備份 {summary['errors']}")
+    return f"  ⚠ {'、'.join(notes)}" if notes else ""
 
 
 def _resolve(repo, ref: str):
@@ -227,6 +258,10 @@ def _list_snapshot(repo, args: argparse.Namespace) -> int:
 
     def show(n, full: str) -> None:
         suffix = "/" if n.type == DIR else (f" -> {n.target}" if n.type == SYMLINK else "")
+        if n.stale_since:
+            suffix += f"  ⚠ 沿用 {fmt_time(n.stale_since)} 的版本（當時無法讀取）"
+        if n.changing:
+            suffix += "  ⚠ 備份時持續被修改，內容可能不一致"
         if args.long:
             size = "" if n.type == DIR else f"{n.size:,}"
             out(

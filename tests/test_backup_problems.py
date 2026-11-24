@@ -18,6 +18,7 @@ from homevault.restore import find_node, run_restore
 from homevault.retention import KeepPolicy
 
 MTIME = 1_700_000_000_000_000_000
+SECOND = 1_000_000_000  # mtime 以秒遞增：NTFS 精度為 100 奈秒，1 奈秒的差異會被截掉
 
 
 def locked_opener(*locked_names):
@@ -43,7 +44,8 @@ def test_file_locked_three_nights_keeps_last_readable_version(small_repo, tmp_pa
     night0 = run_backup(small_repo, [str(src)])
 
     for night in range(1, 4):
-        write_file(src / "mail.pst", f"night {night} mailbox ".encode() * 1000, MTIME + night)
+        content = f"night {night} mailbox ".encode() * 1000
+        write_file(src / "mail.pst", content, MTIME + night * SECOND)
         result = run_backup(
             fresh(small_repo), [str(src)], BackupOptions(opener=locked_opener("mail.pst"))
         )
@@ -67,7 +69,7 @@ def test_stale_marker_clears_once_file_is_readable_again(small_repo, tmp_path):
     src = tmp_path / "src"
     write_file(src / "mail.pst", b"v0", MTIME)
     run_backup(small_repo, [str(src)])
-    write_file(src / "mail.pst", b"v1", MTIME + 1)
+    write_file(src / "mail.pst", b"v1", MTIME + SECOND)
     run_backup(fresh(small_repo), [str(src)], BackupOptions(opener=locked_opener("mail.pst")))
     result = run_backup(fresh(small_repo), [str(src)])
     node = find_node(fresh(small_repo), result.snapshot, f"{src}/mail.pst")
@@ -121,7 +123,7 @@ class ChangingFile:
         if self.remaining > 0:
             self.remaining -= 1
             # 讀完之後檔案被改寫：大小與 mtime 都變了
-            write_file(self.path, data + b" appended", MTIME + 1000 + self.remaining)
+            write_file(self.path, data + b" appended", MTIME + (10 + self.remaining) * SECOND)
         return io.BytesIO(data)
 
 
@@ -159,7 +161,7 @@ def test_cli_lists_stale_files_with_exit_code_3(small_repo, tmp_path, monkeypatc
     src = tmp_path / "src"
     write_file(src / "mail.pst", b"v0", MTIME)
     run_backup(small_repo, [str(src)])
-    write_file(src / "mail.pst", b"v1", MTIME + 1)
+    write_file(src / "mail.pst", b"v1", MTIME + SECOND)
 
     original = backup_module.BackupOptions
     monkeypatch.setattr(

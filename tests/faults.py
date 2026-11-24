@@ -118,5 +118,10 @@ def op_kinds(log: list[tuple[str, str]]) -> set[str]:
     return {kind for kind, _ in log}
 
 
+def op_signature(log: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """操作序列的簽章：(操作種類, 作用的目錄)。檔名含隨機值與雜湊，每次都不同，不列入比對。"""
+    return [(kind, name.split("/", 1)[0]) for kind, name in log]
+
+
 def file_count(root) -> int:
     return sum(len(files) for _, _, files in os.walk(root))

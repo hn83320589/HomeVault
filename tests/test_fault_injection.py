@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 from conftest import PASSWORD, SMALL_CHUNKS, SMALL_PACK, file_manifest, write_file
-from faults import FaultInjectingBackend, SimulatedCrash, op_kinds
+from faults import FaultInjectingBackend, SimulatedCrash, op_kinds, op_signature
 
 from homevault.backup import run_backup
 from homevault.check import run_check
@@ -175,6 +175,7 @@ SCENARIOS = {
     for s in (BackupScenario(), CheckpointBackupScenario(), ForgetScenario(), PruneScenario())
 }
 _op_counts: dict[str, tuple[int, set[str]]] = {}
+_op_signatures: dict[str, list[tuple[str, str]]] = {}
 
 
 def count_ops(t: Template, scenario: Scenario) -> tuple[int, set[str]]:
@@ -184,18 +185,70 @@ def count_ops(t: Template, scenario: Scenario) -> tuple[int, set[str]]:
         backend = FaultInjectingBackend(t.repo)
         scenario.run(Repository.open(t.repo, PASSWORD, backend=backend), t)
         _op_counts[scenario.name] = (backend.ops, op_kinds(backend.log))
+        _op_signatures[scenario.name] = op_signature(backend.log)
     return _op_counts[scenario.name]
 
 
+def sequence_mismatch(
+    counted: list[tuple[str, str]],
+    actual: list[tuple[str, str]],
+    *,
+    crashed: bool,
+    crash_at: int,
+) -> str | None:
+    """比對「計數時」與「這次中斷時」的操作序列。一致時回傳 None，否則回傳診斷訊息。
+
+    窮舉中斷點的前提是同一個情境每次執行的操作序列完全相同；若不同，第 k 個中斷點
+    可能落在不同的動作上，或根本到達不了，測試結果就失去意義。
+    """
+    problems = []
+    for i, (want, got) in enumerate(zip(counted, actual, strict=False), 1):
+        if want != got:
+            problems.append(f"第 {i} 個操作不一致：計數時為 {want}，這次為 {got}")
+            break
+    if not crashed:
+        problems.append(
+            f"這次執行沒有到達第 {crash_at} 個操作就結束了"
+            f"（計數時共 {len(counted)} 個操作，這次只有 {len(actual)} 個）"
+        )
+    if not problems:
+        return None
+    return (
+        "操作序列不確定，這個中斷點的測試結果不可信："
+        + "；".join(problems)
+        + f"\n這次最後 8 個操作：{actual[-8:]}"
+    )
+
+
 def crash_and_verify(t: Template, scenario: Scenario, crash_at: int, power_loss: bool) -> None:
+    count_ops(t, scenario)  # 確保已取得計數時的操作序列
     t.reset()
     scenario.prepare(t)
     existing_before = set(Repository.open(t.repo, PASSWORD).list_snapshot_ids())
 
     backend = FaultInjectingBackend(t.repo, crash_at, power_loss=power_loss)
-    with pytest.raises(SimulatedCrash):
+    crashed = False
+    try:
         scenario.run(Repository.open(t.repo, PASSWORD, backend=backend), t)
+    except SimulatedCrash:
+        crashed = True
+    mismatch = sequence_mismatch(
+        _op_signatures[scenario.name], op_signature(backend.log), crashed=crashed, crash_at=crash_at
+    )
+    assert mismatch is None, mismatch
 
+    try:
+        _verify_after_crash(t, scenario, existing_before, backend)
+    except Exception as exc:
+        raise AssertionError(
+            f"[{scenario.name}] 在第 {crash_at} 個操作 {backend.log[-1]} 中斷後驗證失敗："
+            f"{type(exc).__name__}: {exc}\n中斷前最後 8 個操作：{backend.log[-8:]}"
+        ) from exc
+
+
+def _verify_after_crash(
+    t: Template, scenario: Scenario, existing_before: set[bytes], backend: FaultInjectingBackend
+) -> None:
     # 1. 完整性檢查通過
     result = run_check(Repository.open(t.repo, PASSWORD), read_data=True)
     assert result.ok, f"中斷於 {backend.log[-1]} 後 check 失敗：{result.errors}"
@@ -274,3 +327,27 @@ def test_interrupted_backup_reuses_written_packs(template):
         run_backup(Repository.open(t.repo, PASSWORD, backend=backend), [str(t.src)])
     resumed = run_backup(Repository.open(t.repo, PASSWORD), [str(t.src)])
     assert resumed.snapshot.summary["data_added_stored"] < full_added * 0.2
+
+
+# ── 診斷工具本身的測試 ───────────────────────────────────
+
+
+def test_sequence_check_accepts_identical_prefix():
+    counted = [("write", "tmp"), ("fsync", "tmp"), ("rename", "data"), ("delete", "locks")]
+    assert sequence_mismatch(counted, counted[:3], crashed=True, crash_at=3) is None
+
+
+def test_sequence_check_reports_run_that_ended_before_crash_point():
+    counted = [("write", "tmp"), ("fsync", "tmp"), ("rename", "data")]
+    message = sequence_mismatch(counted, counted[:2], crashed=False, crash_at=3)
+    assert "沒有到達第 3 個操作" in message
+    assert "計數時共 3 個操作，這次只有 2 個" in message
+
+
+def test_sequence_check_reports_first_divergence():
+    counted = [("write", "tmp"), ("fsync", "tmp"), ("rename", "data")]
+    actual = [("write", "tmp"), ("delete", "locks"), ("rename", "data")]
+    message = sequence_mismatch(counted, actual, crashed=True, crash_at=3)
+    assert "第 2 個操作" in message
+    assert "('fsync', 'tmp')" in message
+    assert "('delete', 'locks')" in message

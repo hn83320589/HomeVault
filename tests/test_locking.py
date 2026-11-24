@@ -82,10 +82,15 @@ def test_lock_refresh_updates_timestamp(repo, monkeypatch):
     monkeypatch.setattr(locking, "REFRESH_EVERY", 0.05)
     with repo.lock(exclusive=False) as lock:
         first = lock.info.refreshed
-        time.sleep(0.3)
-        infos = [i for _, i in read_locks(repo.backend, repo.key)]
-        assert len(infos) == 1
-        assert infos[0].refreshed > first
+        # 以輪詢等待而非固定時間：CI 機器較慢時，寫檔與 fsync 可能超過 0.3 秒
+        deadline = time.monotonic() + 5
+        refreshed = []
+        while time.monotonic() < deadline and not refreshed:
+            infos = [i for _, i in read_locks(repo.backend, repo.key) if i]
+            refreshed = [i for i in infos if i.refreshed > first]
+            time.sleep(0.02)
+        assert refreshed, "5 秒內 lock 沒有被更新"
+    assert read_locks(repo.backend, repo.key) == []  # 釋放後新舊 lock 都已移除
 
 
 def test_check_held_detects_lock_removed_by_other_computer(repo):
